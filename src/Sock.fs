@@ -108,6 +108,7 @@ module SocketExtensions =
     type SocketBuilder() = 
         member __.Bind(free, f) = Socket.bind f free 
         member __.Return(v) = Pure v
+        member __.ReturnFrom(v: Socket<_>) = v
         member __.Combine(f1, f2) = Socket.bind (fun _ -> f2) f1
         member __.Zero() = Pure ()
         member __.Delay(f) = f()
