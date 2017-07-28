@@ -1,4 +1,5 @@
-﻿// Learn more about F# at http://fsharp.org
+namespace Socks
+
 open System
 open System.Net
 open System.Net.Sockets
@@ -12,6 +13,7 @@ type FreeSocket<'a> =
     | Pure of 'a
     | FreeSocket of SocketIO<FreeSocket<'a>>
 
+[<RequireQualifiedAccess>]
 module Socket =
 
 
@@ -71,27 +73,14 @@ module Socket =
 
 [<AutoOpen>]
 module SocketExtensions =
-    let (>>=) = fun free f -> Socket.bind f free
-    let (>>.) = fun f1 f2 -> f1 >>= fun _ -> f2
     type SocketBuilder() = 
-        member __.Bind(free, f) = free >>= f
+        member __.Bind(free, f) = Socket.bind f free 
         member __.Return(v) = Pure v
-        member __.Combine(f1, f2) = f1 >>. f2
+        member __.Combine(f1, f2) = Socket.bind (fun _ -> f2) f1
         member __.Zero() = Pure ()
         member __.Delay(f) = f()
     
     
-    let write s = Socket.liftF(Write(fun socket -> s, (), socket))
-    let read = Socket.liftF(Read(fun socket -> id, socket))
+    let writeSocket s = Socket.liftF(Write(fun socket -> s, (), socket))
+    let readSocket = Socket.liftF(Read(fun socket -> id, socket))
     let socketIO = SocketBuilder()
-
-
-[<EntryPoint>]
-let main argv =
-    let socketExample = socketIO {
-        do! write "What is your name?"
-        let! name = read 
-        do! write ("Hello " + name)
-    }
-    Socket.run socketExample 9000
-    0
