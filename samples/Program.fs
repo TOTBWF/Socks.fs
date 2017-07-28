@@ -9,5 +9,5 @@ let main argv =
         let! name = readSocket
         do! writeSocket ("Hello " + name)
     }
-    Socket.run socketExample 9000
+    Socket.run socketExample 9000 |> Async.RunSynchronously
     0
