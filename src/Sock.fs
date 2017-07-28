@@ -6,12 +6,12 @@ open System.Net.Sockets
 open System.Text
 
 type SocketIO<'a> = 
-    | Write of (Socket -> Async<string * 'a * Socket>)
-    | Read of (Socket -> Async<(string -> 'a) * Socket>)
+    | Write of (NetworkStream -> Async<string * 'a * NetworkStream>)
+    | Read of (NetworkStream -> Async<(string -> 'a) * NetworkStream>)
 
-type FreeSocket<'a> =
+type Socket<'a> =
     | Pure of 'a
-    | FreeSocket of SocketIO<FreeSocket<'a>>
+    | Socket of SocketIO<Socket<'a>>
 
 [<RequireQualifiedAccess>]
 module Socket =
@@ -34,52 +34,74 @@ module Socket =
                 })
 
 
-    let rec bind (f: 'a -> FreeSocket<'b>) (free: FreeSocket<'a>): FreeSocket<'b> =
+    let rec bind (f: 'a -> Socket<'b>) (free: Socket<'a>): Socket<'b> =
         match free with
         | Pure v -> f v
-        | FreeSocket io -> FreeSocket (map (bind f) io)
+        | Socket io -> Socket (map (bind f) io)
 
-    let liftF (io: SocketIO<'a>): FreeSocket<'a> =
-        FreeSocket (map Pure io)
+    let liftF (io: SocketIO<'a>): Socket<'a> =
+        Socket (map Pure io)
 
-    let private initSocket (port: int) = 
+    let private initServer (port: int) (maxConnections: int) = 
         async {
-            let! ipHostInfo = Dns.GetHostEntryAsync(Dns.GetHostName()) |> Async.AwaitTask
-            let ipAddress = ipHostInfo.AddressList.[0]
-            let localEndPoint = IPEndPoint(ipAddress, port)
-            printfn "Listening at address %s on port %d" (ipAddress.ToString()) port
-            let socket = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp)
-            do socket.Bind(localEndPoint)
-            do socket.Listen(100)
-            return socket
+            try
+                let! ipHostInfo = Dns.GetHostEntryAsync(Dns.GetHostName()) |> Async.AwaitTask
+                let ipAddress = ipHostInfo.AddressList.[0]
+                let localEndPoint = IPEndPoint(ipAddress, port)
+                let listener = TcpListener(localEndPoint)
+                listener.Server.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReuseAddress, 1)
+                listener.Start(maxConnections)
+                return listener 
+            with e -> printfn "Server Init failed: %s" e.Message; return null
+        }
+    
+    let rec private interpret s stream = 
+        async {
+            match s with
+            | Socket(Write (writeFn)) -> 
+                let! msg, next, stream = writeFn stream
+                do! stream.WriteAsync(Encoding.ASCII.GetBytes(msg), 0, msg.Length) |> Async.AwaitTask
+                return! interpret next stream
+            | Socket(Read(readFn)) ->
+                let! readFn, stream = readFn stream
+                let mutable buffer = Array.zeroCreate<byte>(1024)
+                let! read = stream.ReadAsync(buffer, 0, buffer.Length) |> Async.AwaitTask
+                let msg = Encoding.ASCII.GetString(buffer, 0, read)
+                return! interpret (readFn msg) stream
+            | Pure a -> 
+                stream.Dispose()
+                return a
+        }
+    /// Runs a socket computation for a single connection
+    let run (port: int) (free: Socket<'a>) : Async<'a> =
+        async {
+            let! listener = initServer port 1
+            let! tcp = listener.AcceptTcpClientAsync() |> Async.AwaitTask
+            let! res = interpret free (tcp.GetStream())
+            do tcp.Dispose()
+            do listener.Stop()
+            return res
         }
 
-    let run (free: FreeSocket<'a>) (port: int) : Async<'a> =
-        // Set up the state
-        let rec helper s socket = 
-            async {
-                match s with
-                | FreeSocket(Write (writeFn)) -> 
-                    let! msg, next, socket = writeFn socket
-                    do socket.Send(Encoding.ASCII.GetBytes(msg + "\n")) |> ignore
-                    return! helper next socket
-                | FreeSocket(Read(readFn)) ->
-                    let! readFn, socket = readFn socket
-                    let mutable buffer = Array.zeroCreate<byte>(1024)
-                    let read = socket.Receive(buffer)
-                    let msg = Encoding.ASCII.GetString(buffer, 0, read)
-                    return! helper (readFn msg) socket
-                | Pure a -> 
-                    socket.Shutdown(SocketShutdown.Both)
-                    socket.Dispose()
-                    return a
-            }
-            
-        async {
-            let! listener = initSocket port
-            let! socket = listener.AcceptAsync() |> Async.AwaitTask
-            return! helper free socket
+    /// Runs a socket computation as a parallel connection, 
+    let runParallel (port: int) (maxConnections: int) (free: Socket<'a>) : Async<unit> =
+        let handleClient (tcp: TcpClient) = async {
+            let! res = interpret free (tcp.GetStream())
+            do tcp.Dispose()
         }
+        let rec loop (listener: TcpListener) = async {
+            let! tcp = listener.AcceptTcpClientAsync() |> Async.AwaitTask
+            do handleClient tcp |> Async.Start
+            return! loop listener
+        } 
+        async {
+            let! listener = initServer port maxConnections
+            let! res = loop listener
+            do listener.Stop()
+        }
+
+    let writeSocket s = liftF(Write(fun socket -> async { return s, (), socket }))
+    let readSocket = liftF(Read(fun socket -> async { return id, socket }))
 
 [<AutoOpen>]
 module SocketExtensions =
@@ -91,6 +113,4 @@ module SocketExtensions =
         member __.Delay(f) = f()
     
     
-    let writeSocket s = Socket.liftF(Write(fun socket -> async { return s, (), socket }))
-    let readSocket = Socket.liftF(Read(fun socket -> async { return id, socket }))
     let socketIO = SocketBuilder()
