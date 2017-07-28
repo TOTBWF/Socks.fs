@@ -5,7 +5,6 @@ open System.Net.Sockets
 open System.Text
 
 type SocketIO<'a> = 
-    // | Close of (Socket -> 'a)
     | Write of (Socket -> string * 'a * Socket)
     | Read of (Socket -> (string -> 'a) * Socket)
 
@@ -19,7 +18,6 @@ module Socket =
     // Define our functor
     let map (f: 'a -> 'b) (io: SocketIO<'a>) : SocketIO<'b> =
         match io with
-        // | Close(g) -> Close(g >> f)
         | Write(g) -> 
             Write(fun socket ->
                 let msg, a, socket = g socket 
