@@ -5,10 +5,9 @@ open System.Net.Sockets
 open System.Text
 
 type SocketIO<'a> = 
-    | Connect of int * (Socket -> 'a)
-    | Close of Socket * 'a
-    | Write of Socket * string * 'a
-    | Read of Socket * (string -> 'a)
+    // | Close of (Socket -> 'a)
+    | Write of (Socket -> string * 'a * Socket)
+    | Read of (Socket -> (string -> 'a) * Socket)
 
 type FreeSocket<'a> =
     | Pure of 'a
@@ -16,13 +15,20 @@ type FreeSocket<'a> =
 
 module Socket =
 
+
     // Define our functor
     let map (f: 'a -> 'b) (io: SocketIO<'a>) : SocketIO<'b> =
         match io with
-        | Connect(p, fn) -> Connect(p, fn >> f)
-        | Close(sock, v) -> Close(sock, f v)
-        | Write(sock, s, next) -> Write(sock, s, f next)
-        | Read(sock, fn) -> Read(sock, fn >> f)
+        // | Close(g) -> Close(g >> f)
+        | Write(g) -> 
+            Write(fun socket ->
+                let msg, a, socket = g socket 
+                msg, f a, socket)
+        | Read(g) ->
+            Read(fun socket ->
+                let h, socket = g socket
+                h >> f, socket)
+
 
     let rec bind (f: 'a -> FreeSocket<'b>) (free: FreeSocket<'a>): FreeSocket<'b> =
         match free with
@@ -42,35 +48,28 @@ module Socket =
         socket.Listen(100)
         socket
 
-    let run (s: FreeSocket<'a>) : 'a =
+    let run (s: FreeSocket<'a>) (port: int) : 'a =
         // Set up the state
-        let rec helper s = 
+        let listener = initSocket port
+        let socket = listener.Accept()
+        printfn "Socket Connected!"
+        let rec helper s socket = 
             match s with
-            | FreeSocket(Connect(port, f)) ->
-                printfn "Waiting for connection..."
-                let listener = initSocket port
-                let socket = listener.Accept()
-                printfn "Socket Connected!"
-                helper (f socket) 
-            | FreeSocket(Close(socket, v)) ->
-                printfn "Closing socket..."
-                socket.Shutdown(SocketShutdown.Both)
-                socket.Dispose()
-                helper v
-            | FreeSocket(Write (socket, s, next)) -> 
-                printfn "Writing socket: %s" s
-                let res = socket.Send(Encoding.ASCII.GetBytes(s + "\n"))
-                printfn "Message sent with result: %d" res
-                helper next 
-            | FreeSocket(Read(socket, f)) ->
-                // Do Socket IO instead
-                printfn "Blocking On Read..."
+            | FreeSocket(Write (writeFn)) -> 
+                let msg, next, socket = writeFn socket
+                socket.Send(Encoding.ASCII.GetBytes(msg + "\n")) |> ignore
+                helper next socket
+            | FreeSocket(Read(readFn)) ->
+                let readFn, socket = readFn socket
                 let mutable buffer = Array.zeroCreate<byte>(1024)
                 let read = socket.Receive(buffer)
                 let msg = Encoding.ASCII.GetString(buffer, 0, read)
-                helper (f msg) 
-            | Pure a -> a
-        helper s 
+                helper (readFn msg) socket
+            | Pure a -> 
+                socket.Shutdown(SocketShutdown.Both)
+                socket.Dispose()
+                a
+        helper s socket
 
 [<AutoOpen>]
 module SocketExtensions =
@@ -84,21 +83,17 @@ module SocketExtensions =
         member __.Delay(f) = f()
     
     
-    let connect port = Socket.liftF(Connect(port, id))
-    let write socket s = Socket.liftF(Write(socket, s, ()))
-    let read socket = Socket.liftF(Read(socket, id))
-    let close socket = Socket.liftF(Close(socket, ()))
+    let write s = Socket.liftF(Write(fun socket -> s, (), socket))
+    let read = Socket.liftF(Read(fun socket -> id, socket))
     let socketIO = SocketBuilder()
 
 
 [<EntryPoint>]
 let main argv =
     let socketExample = socketIO {
-        let! socket = connect 9000
-        do! write socket "What is your name?"
-        let! name = read socket
-        do! write socket ("Hello " + name)
-        do! close socket
+        do! write "What is your name?"
+        let! name = read 
+        do! write ("Hello " + name)
     }
-    Socket.run socketExample
+    Socket.run socketExample 9000
     0
